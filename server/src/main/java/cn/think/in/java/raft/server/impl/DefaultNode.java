@@ -53,7 +53,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public class DefaultNode implements Node, ClusterMembershipChanges {
 
     /** 选举时间间隔基数 */
-    public volatile long electionTime = 15 * 1000;
+    public volatile long electionTimeout = ThreadLocalRandom.current().nextInt(0, 500);
+    public volatile long electionTime = 1500;
     /** 上一次选举时间 */
     public volatile long preElectionTime = 0;
 
@@ -152,8 +153,8 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
         consensus = new DefaultConsensus(this);
         delegate = new ClusterMembershipChangesImpl(this);
 
-        RaftThreadPool.scheduleWithFixedDelay(heartBeatTask, 500);
-        RaftThreadPool.scheduleAtFixedRate(electionTask, 6000, 500);
+        RaftThreadPool.scheduleWithFixedDelay(heartBeatTask, 200);
+        RaftThreadPool.scheduleWithFixedDelay(electionTask,  200);
         RaftThreadPool.execute(replicationFailQueueConsumer);
 
         LogEntry logEntry = logModule.getLast();
@@ -284,12 +285,10 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
         // 如果存在一个满足N > commitIndex的 N，并且大多数的matchIndex[i] ≥ N成立，
         // 并且log[N].term == currentTerm成立，那么令 commitIndex 等于这个 N （5.3 和 5.4 节）
         List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
+        matchIndexList.add(logEntry.getIndex()); // Leader 自己
         // 小于 2, 没有意义
-        int median = 0;
-        if (matchIndexList.size() >= 2) {
-            Collections.sort(matchIndexList);
-            median = matchIndexList.size() / 2;
-        }
+        Collections.sort(matchIndexList);
+        int median = matchIndexList.size() / 2;
         Long N = matchIndexList.get(median);
         if (N > commitIndex) {
             LogEntry entry = logModule.read(N);
@@ -298,16 +297,10 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
             }
         }
 
-        //  响应客户端(成功一半)
-        if (success.get() >= (count / 2)) {
-            // 更新
-            commitIndex = logEntry.getIndex();
-            //  应用到状态机
+        // 只有日志被正式 commit 才允许 apply + 响应客户端
+        if (logEntry.getIndex() <= commitIndex) {
             getStateMachine().apply(logEntry);
             lastApplied = commitIndex;
-
-            log.info("success apply local state machine,  logEntry info : {}", logEntry);
-            // 返回成功.
             return ClientKVAck.ok();
         } else {
             // 回滚已经提交的日志.
@@ -323,7 +316,7 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
         for (Future<Boolean> future : futureList) {
             RaftThreadPool.execute(() -> {
                 try {
-                    resultList.add(future.get(3000, MILLISECONDS));
+                    resultList.add(future.get(3000, MILLISECONDS));     // 3s内没执行完会抛出超时异常
                 } catch (Exception e) {
                     log.error(e.getMessage(), e);
                     resultList.add(false);
@@ -416,13 +409,13 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 } catch (Exception e) {
                     log.warn(e.getMessage(), e);
                     // TODO 到底要不要放队列重试?
-//                        ReplicationFailModel model =  ReplicationFailModel.newBuilder()
-//                            .callable(this)
-//                            .logEntry(entry)
-//                            .peer(peer)
-//                            .offerTime(System.currentTimeMillis())
-//                            .build();
-//                        replicationFailQueue.offer(model);
+                    ReplicationFailModel model =  ReplicationFailModel.builder()
+                        .callable(() -> replication(peer, entry))
+                        .logEntry(entry)
+                        .peer(peer)
+                        .offerTime(System.currentTimeMillis())
+                        .build();
+                    replicationFailQueue.offer(model);
                     return false;
                 }
             }
@@ -530,15 +523,17 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
 
             long current = System.currentTimeMillis();
             // 基于 RAFT 的随机时间,解决冲突.
-            electionTime = electionTime + ThreadLocalRandom.current().nextInt(50);
-            if (current - preElectionTime < electionTime) {
+//            electionTime = electionTime + ThreadLocalRandom.current().nextInt(50);
+            if (current - preElectionTime < electionTime + electionTimeout) {
                 return;
             }
             status = NodeStatus.CANDIDATE;
             log.error("node {} will become CANDIDATE and start election leader, current term : [{}], LastEntry : [{}]",
                     peerSet.getSelf(), currentTerm, logModule.getLast());
 
-            preElectionTime = System.currentTimeMillis() + ThreadLocalRandom.current().nextInt(200) + 150;
+            preElectionTime = System.currentTimeMillis();
+            electionTimeout = ThreadLocalRandom.current().nextInt(0, 10000);
+//            preElectionTime = System.currentTimeMillis() + ThreadLocalRandom.current().nextInt(200) + 150;
 
             currentTerm = currentTerm + 1;
             // 推荐自己.
@@ -601,8 +596,11 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                         } else {
                             // 更新自己的任期.
                             long resTerm = result.getTerm();
-                            if (resTerm >= currentTerm) {
+                            if (resTerm > currentTerm) {
                                 currentTerm = resTerm;
+                                status = NodeStatus.FOLLOWER;
+                                votedFor = "";
+                                return -1;
                             }
                         }
                         return 0;
@@ -629,7 +627,7 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 return;
             }
             // 加上自身.
-            if (success >= peers.size() / 2) {
+            if (success + 1 >= (peers.size() + 1) / 2 + 1) {
                 log.warn("node {} become leader ", peerSet.getSelf());
                 status = NodeStatus.LEADER;
                 peerSet.setLeader(peerSet.getSelf());
@@ -640,7 +638,9 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 votedFor = "";
             }
             // 再次更新选举时间
-            preElectionTime = System.currentTimeMillis() + ThreadLocalRandom.current().nextInt(200) + 150;
+//            preElectionTime = System.currentTimeMillis() + ThreadLocalRandom.current().nextInt(200) + 150;
+            preElectionTime = System.currentTimeMillis();
+            electionTimeout = ThreadLocalRandom.current().nextInt(0, 10000);
 
         }
     }
@@ -700,12 +700,10 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
         // 如果存在一个满足N > commitIndex的 N，并且大多数的matchIndex[i] ≥ N成立，
         // 并且log[N].term == currentTerm成立，那么令 commitIndex 等于这个 N （5.3 和 5.4 节）
         List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
+        matchIndexList.add(logEntry.getIndex()); // Leader 自己
         // 小于 2, 没有意义
-        int median = 0;
-        if (matchIndexList.size() >= 2) {
-            Collections.sort(matchIndexList);
-            median = matchIndexList.size() / 2;
-        }
+        Collections.sort(matchIndexList);
+        int median = matchIndexList.size() / 2;
         Long N = matchIndexList.get(median);
         if (N > commitIndex) {
             LogEntry entry = logModule.read(N);
@@ -714,11 +712,8 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
             }
         }
 
-        //  响应客户端(成功一半)
-        if (success.get() >= (count / 2)) {
-            // 更新
-            commitIndex = logEntry.getIndex();
-            //  应用到状态机
+        //  只有日志被正式 commit 才允许 apply + 响应客户端
+        if (logEntry.getIndex() <= commitIndex) {
             getStateMachine().apply(logEntry);
             lastApplied = commitIndex;
 

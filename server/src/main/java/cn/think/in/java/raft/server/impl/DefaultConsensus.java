@@ -30,6 +30,7 @@ import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -70,6 +71,13 @@ public class DefaultConsensus implements Consensus {
                 return builder.term(node.getCurrentTerm()).voteGranted(false).build();
             }
 
+            // 新 term 清空 voteFor
+            if (param.getTerm() > node.getCurrentTerm()) {
+                node.setCurrentTerm(param.getTerm());
+                node.setVotedFor("");
+                node.status = NodeStatus.FOLLOWER;
+            }
+
             // 对方任期没有自己新
             if (param.getTerm() < node.getCurrentTerm()) {
                 return builder.term(node.getCurrentTerm()).voteGranted(false).build();
@@ -99,6 +107,8 @@ public class DefaultConsensus implements Consensus {
                 node.setCurrentTerm(param.getTerm());
                 node.setVotedFor(param.getServerId());
                 // 返回成功
+                node.preElectionTime = System.currentTimeMillis();
+                node.electionTimeout = ThreadLocalRandom.current().nextInt(0, 10000);
                 return builder.term(node.currentTerm).voteGranted(true).build();
             }
 
@@ -136,6 +146,7 @@ public class DefaultConsensus implements Consensus {
 
             node.preHeartBeatTime = System.currentTimeMillis();
             node.preElectionTime = System.currentTimeMillis();
+            node.electionTimeout = ThreadLocalRandom.current().nextInt(0, 10000);
             node.peerSet.setLeader(new Peer(param.getLeaderId()));
 
             // 够格
@@ -154,41 +165,46 @@ public class DefaultConsensus implements Consensus {
                     param.getLeaderId(), param.getTerm(), node.getCurrentTerm());
 
                 // 处理 leader 已提交但未应用到状态机的日志
-
-                // 下一个需要提交的日志的索引（如有）
-                long nextCommit = node.getCommitIndex() + 1;
-
-                //如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
-                if (param.getLeaderCommit() > node.getCommitIndex()) {
-                    int commitIndex = (int) Math.min(param.getLeaderCommit(), node.getLogModule().getLastIndex());
-                    node.setCommitIndex(commitIndex);
-                    node.setLastApplied(commitIndex);
-                }
-
-                while (nextCommit <= node.getCommitIndex()){
-                    // 提交之前的日志
-                    node.stateMachine.apply(node.logModule.read(nextCommit));
-                    nextCommit++;
-                }
+                applyCommittedLogs(param.getLeaderCommit());
+//                // 下一个需要提交的日志的索引（如有）
+//                long nextCommit = node.getCommitIndex() + 1;
+//
+//                //如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
+//                if (param.getLeaderCommit() > node.getCommitIndex()) {
+//                    int commitIndex = (int) Math.min(param.getLeaderCommit(), node.getLogModule().getLastIndex());
+//                    node.setCommitIndex(commitIndex);
+//                    node.setLastApplied(commitIndex);
+//                }
+//
+//                while (nextCommit <= node.getCommitIndex()){
+//                    // 提交之前的日志
+//                    node.stateMachine.apply(node.logModule.read(nextCommit));
+//                    nextCommit++;
+//                }
                 return AentryResult.newBuilder().term(node.getCurrentTerm()).success(true).build();
             }
 
-            // 真实日志
-            // 第一次
-            if (node.getLogModule().getLastIndex() != 0 && param.getPrevLogIndex() != 0) {
-                LogEntry logEntry;
-                if ((logEntry = node.getLogModule().read(param.getPrevLogIndex())) != null) {
-                    // 如果日志在 prevLogIndex 位置处的日志条目的任期号和 prevLogTerm 不匹配，则返回 false
-                    // 需要减小 nextIndex 重试.
-                    if (logEntry.getTerm() != param.getPreLogTerm()) {
-                        return result;
-                    }
-                } else {
-                    // index 不对, 需要递减 nextIndex 重试.
-                    return result;
-                }
-
+            LogEntry prevEntry = node.getLogModule().read(param.getPrevLogIndex());
+            if (param.getPrevLogIndex() != 0 && (prevEntry == null || prevEntry.getTerm() != param.getPreLogTerm())) {
+                return result;
             }
+
+//            // 真实日志
+//            // 第一次
+//            if (node.getLogModule().getLastIndex() != 0 && param.getPrevLogIndex() != 0) {
+//                LogEntry logEntry;
+//                if ((logEntry = node.getLogModule().read(param.getPrevLogIndex())) != null) {
+//                    // 如果日志在 prevLogIndex 位置处的日志条目的任期号和 prevLogTerm 不匹配，则返回 false
+//                    // 需要减小 nextIndex 重试.
+//                    if (logEntry.getTerm() != param.getPreLogTerm()) {
+//                        return result;
+//                    }
+//                } else {
+//                    // index 不对, 需要递减 nextIndex 重试.
+//                    return result;
+//                }
+//
+//            }
 
             // 如果已经存在的日志条目和新的产生冲突（索引值相同但是任期号不同），删除这一条和之后所有的
             LogEntry existLog = node.getLogModule().read(((param.getPrevLogIndex() + 1)));
@@ -207,21 +223,22 @@ public class DefaultConsensus implements Consensus {
                 result.setSuccess(true);
             }
 
-            // 下一个需要提交的日志的索引（如有）
-            long nextCommit = node.getCommitIndex() + 1;
-
-            //如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
-            if (param.getLeaderCommit() > node.getCommitIndex()) {
-                int commitIndex = (int) Math.min(param.getLeaderCommit(), node.getLogModule().getLastIndex());
-                node.setCommitIndex(commitIndex);
-                node.setLastApplied(commitIndex);
-            }
-
-            while (nextCommit <= node.getCommitIndex()){
-                // 提交之前的日志
-                node.stateMachine.apply(node.logModule.read(nextCommit));
-                nextCommit++;
-            }
+//            // 下一个需要提交的日志的索引（如有）
+//            long nextCommit = node.getCommitIndex() + 1;
+//
+//            //如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
+//            if (param.getLeaderCommit() > node.getCommitIndex()) {
+//                int commitIndex = (int) Math.min(param.getLeaderCommit(), node.getLogModule().getLastIndex());
+//                node.setCommitIndex(commitIndex);
+//                node.setLastApplied(commitIndex);
+//            }
+//
+//            while (nextCommit <= node.getCommitIndex()){
+//                // 提交之前的日志
+//                node.stateMachine.apply(node.logModule.read(nextCommit));
+//                nextCommit++;
+//            }
+            applyCommittedLogs(param.getLeaderCommit());
 
             result.setTerm(node.getCurrentTerm());
 
@@ -230,6 +247,22 @@ public class DefaultConsensus implements Consensus {
             return result;
         } finally {
             appendLock.unlock();
+        }
+    }
+
+    private void applyCommittedLogs(long leaderCommit) {
+        // 下一个需要提交的日志的索引（如有）
+        long nextCommit = node.getCommitIndex() + 1;
+        //如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
+        if (leaderCommit > node.getCommitIndex()) {
+            int commitIndex = (int) Math.min(leaderCommit, node.getLogModule().getLastIndex());
+            node.setCommitIndex(commitIndex);
+            node.setLastApplied(commitIndex);
+        }
+        while (nextCommit <= node.getCommitIndex()){
+            // 提交之前的日志
+            node.stateMachine.apply(node.logModule.read(nextCommit));
+            nextCommit++;
         }
     }
 
