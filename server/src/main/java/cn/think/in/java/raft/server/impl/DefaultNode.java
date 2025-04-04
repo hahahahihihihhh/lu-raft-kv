@@ -55,7 +55,7 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
     /** 选举时间间隔基数 */
     public volatile long electionTime = 1500;
     /** 选举时间间隔波动范围 */
-    public volatile long electionTimeout = ThreadLocalRandom.current().nextInt(0, 500);
+    public volatile long electionTimeout = ThreadLocalRandom.current().nextInt(0, 1000);
     /** 上一次选举时间 */
     public volatile long preElectionTime = 0;
 
@@ -263,29 +263,13 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 success.incrementAndGet();
             }
         }
-        // 如果存在一个满足 N > commitIndex 的 N，并且大多数的 matchIndex[i] ≥ N 成立，
-        // 并且 log[N].term == currentTerm 成立（只能推进自己任期的日志原则），那么令 commitIndex 等于这个 N （5.3 和 5.4 节）
-        matchIndexs.put(peerSet.getSelf(), logModule.getLastIndex());
-        List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
-//        matchIndexList.add(logEntry.getIndex()); // Leader 自己
-        Collections.sort(matchIndexList);
-        // 取中位数，满足绝大多数原则
-        int median = matchIndexList.size() / 2;
-        Long N = matchIndexList.get(median);
-        if (N > commitIndex) {
-            LogEntry entry = logModule.read(N);
-            // Leader 只能推进当前任期的日志
-            if (entry != null && entry.getTerm() == currentTerm) {
-                commitIndex = N;
-            }
-        }
+        // 尝试推进 commitIndex
+        tryAdvanceCommitIndex();
         // 只有日志被正式 commit 才允许 apply + 响应客户端，否则响应“预提交”
         // 【可选】 同步写 + 超时放弃（不推荐）
         // 【可选】 同步等待, 让客户端强一致地拿到写成功确认
         // TODO 【可选】 异步返回，提升吞吐，但客户端要能接受“短暂未复制完全”的结果，需要幂等或重试机制
         if (logEntry.getIndex() <= commitIndex) {
-            getStateMachine().apply(logEntry);
-            lastApplied = commitIndex;
             return ClientKVAck.ok();
         } else {
             log.warn("fail apply local state  machine,  logEntry info : {}", logEntry);
@@ -350,9 +334,9 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 }
                 if (result.isSuccess()) {
                     log.info("append follower entry success , follower=[{}], entry=[{}]", peer, aentryParam.getEntries());
-                    // update 这两个追踪值
-                    nextIndexs.put(peer, entry.getIndex() + 1);
-                    matchIndexs.put(peer, entry.getIndex());
+                    // 最大值保护，防止覆盖之前已经成功同步更大 index 的状态
+                    nextIndexs.compute(peer, (k, oldVal) -> oldVal == null ? entry.getIndex() + 1 : Math.max(oldVal, entry.getIndex() + 1));
+                    matchIndexs.compute(peer, (k, oldVal) -> oldVal == null ? entry.getIndex() : Math.max(oldVal, entry.getIndex()));
                     return true;
                 } else {
                     // 对方比我大，认怂，变成跟随者
@@ -449,33 +433,6 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                     }
                 } catch (InterruptedException e) {
                     // ignore
-                }
-            }
-        }
-
-        /**
-         * 在复制成功后，Leader 尝试检查是否可以推进 commitIndex
-         */
-        private synchronized void tryAdvanceCommitIndex() {
-            matchIndexs.put(peerSet.getSelf(), logModule.getLastIndex());
-            List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
-//            matchIndexList.add(logModule.getLastIndex()); // Leader 自己
-            Collections.sort(matchIndexList);
-            // 取中位数，满足绝大多数原则
-            int median = matchIndexList.size() / 2;
-            Long N = matchIndexList.get(median);
-            if (N > commitIndex) {
-                LogEntry entry = logModule.read(N);
-                // Leader 只能推进当前任期的日志
-                if (entry != null && entry.getTerm() == currentTerm) {
-                    commitIndex = N;
-                }
-                while (lastApplied < commitIndex) {
-                    lastApplied++;
-                    LogEntry entryToApply = logModule.read(lastApplied);
-                    if (entryToApply != null) {
-                        stateMachine.apply(entryToApply);
-                    }
                 }
             }
         }
@@ -658,33 +615,10 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                 success.incrementAndGet();
             }
         }
-        // 如果存在一个满足N > commitIndex的 N，并且大多数的matchIndex[i] ≥ N成立，
-        // 并且log[N].term == currentTerm成立，那么令 commitIndex 等于这个 N （5.3 和 5.4 节）
-        matchIndexs.put(peerSet.getSelf(), logModule.getLastIndex());
-        List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
-//        matchIndexList.add(logEntry.getIndex()); // Leader 自己
-        Collections.sort(matchIndexList);
-        int median = matchIndexList.size() / 2;
-        Long N = matchIndexList.get(median);
-        if (N > commitIndex) {
-            LogEntry entry = logModule.read(N);
-            if (entry != null && entry.getTerm() == currentTerm) {
-                commitIndex = N;
-            }
-            while (lastApplied < commitIndex) {
-                lastApplied++;
-                LogEntry entryToApply = logModule.read(lastApplied);
-                if (entryToApply != null) {
-                    stateMachine.apply(entryToApply);
-                } else {
-                    log.warn("log entry to apply is null at index: {}", lastApplied);
-                }
-            }
-        }
+        // 尝试推进 commitIndex
+        tryAdvanceCommitIndex();
         //  只有日志被正式 commit 才允许 apply + 响应客户端
         if (logEntry.getIndex() <= commitIndex) {
-            getStateMachine().apply(logEntry);
-            lastApplied = commitIndex;
             log.info("success apply local state machine,  logEntry info : {}", logEntry);
         } else {
             // TODO 空日志 commit 失败是否回滚退位？但是我后台又有重试机制不停重试，这样空日志总会 commit 的吧，不如不退位
@@ -703,11 +637,10 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
 
         @Override
         public void run() {
-
+            // 只有领导者才能发送心跳
             if (status != NodeStatus.LEADER) {
                 return;
             }
-
             long current = System.currentTimeMillis();
             if (current - preHeartBeatTime < heartBeatTick) {
                 return;
@@ -716,12 +649,9 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
             for (Peer peer : peerSet.getPeersWithOutSelf()) {
                 log.info("Peer {} nextIndex={}", peer.getAddr(), nextIndexs.get(peer));
             }
-
             preHeartBeatTime = System.currentTimeMillis();
-
             // 心跳只关心 term 和 leaderID
             for (Peer peer : peerSet.getPeersWithOutSelf()) {
-
                 AentryParam param = AentryParam.builder()
                         .entries(null)// 心跳,空日志.
                         .leaderId(peerSet.getSelf().getAddr())
@@ -729,17 +659,16 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
                         .term(currentTerm)
                         .leaderCommit(commitIndex) // 心跳时与跟随者同步 commit index
                         .build();
-
                 Request request = new Request(
                         Request.A_ENTRIES,
                         param,
                         peer.getAddr());
-
+                // 处理心跳反馈
                 RaftThreadPool.execute(() -> {
                     try {
                         AentryResult aentryResult = getRpcClient().send(request);
                         long term = aentryResult.getTerm();
-
+                        // 发现任期更高的结点，退位
                         if (term > currentTerm) {
                             log.error("self will become follower, he's term : {}, my term : {}", term, currentTerm);
                             currentTerm = term;
@@ -757,6 +686,36 @@ public class DefaultNode implements Node, ClusterMembershipChanges {
     public void resetElectionTimeout() {
         preElectionTime = System.currentTimeMillis();
         electionTimeout = electionTime + ThreadLocalRandom.current().nextInt(0, 1000);
+    }
+
+    /**
+     * 在复制成功后，Leader 尝试检查是否可以推进 commitIndex
+     */
+    private synchronized void tryAdvanceCommitIndex() {
+        // 如果存在一个满足N > commitIndex的 N，并且大多数的matchIndex[i] ≥ N成立，
+        // 并且log[N].term == currentTerm成立，那么令 commitIndex 等于这个 N （5.3 和 5.4 节）
+        matchIndexs.put(peerSet.getSelf(), logModule.getLastIndex());
+        List<Long> matchIndexList = new ArrayList<>(matchIndexs.values());
+//        matchIndexList.add(logEntry.getIndex()); // Leader 自己
+        Collections.sort(matchIndexList);
+        int median = matchIndexList.size() / 2;
+        Long N = matchIndexList.get(median);
+        if (N > commitIndex) {
+            LogEntry entry = logModule.read(N);
+            // Leader 只能推进当前任期日志
+            if (entry != null && entry.getTerm() == currentTerm) {
+                commitIndex = N;
+            }
+            while (lastApplied < commitIndex) {
+                lastApplied++;
+                LogEntry entryToApply = logModule.read(lastApplied);
+                if (entryToApply != null) {
+                    stateMachine.apply(entryToApply);
+                } else {
+                    log.warn("log entry to apply is null at index: {}", lastApplied);
+                }
+            }
+        }
     }
 
     @Override

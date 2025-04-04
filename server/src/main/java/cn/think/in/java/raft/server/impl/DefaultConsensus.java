@@ -110,7 +110,6 @@ public class DefaultConsensus implements Consensus {
         }
     }
 
-
     /**
      * 附加日志(多个日志,为了提高效率) RPC
      * 接收者实现：
