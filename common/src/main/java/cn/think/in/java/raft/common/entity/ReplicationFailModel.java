@@ -19,6 +19,7 @@ package cn.think.in.java.raft.common.entity;
 import lombok.Builder;
 
 import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
 
 /**
  *
@@ -31,7 +32,7 @@ public class ReplicationFailModel {
 
     public String countKey;
     public String successKey;
-    public Callable callable;
+    public Callable<Boolean> callable;
     public LogEntry logEntry;
     public Peer peer;
     public Long offerTime;

@@ -49,6 +49,10 @@ public class ClientKVAck implements Serializable {
         return new ClientKVAck("fail");
     }
 
+    public static ClientKVAck preOk() {
+        return new ClientKVAck("preOk");
+    }
+
     public static Builder newBuilder() {
         return new Builder();
     }

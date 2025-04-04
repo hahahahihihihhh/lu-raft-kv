@@ -24,7 +24,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class RaftClient2 {
-
+    // 1s 查询一次
     public static void main(String[] args) throws Throwable {
 
         RaftClientRPC rpc = new RaftClientRPC();
@@ -39,10 +39,8 @@ public class RaftClient2 {
             } catch (Exception e) {
                 // ignore
                 e.printStackTrace();
-            } finally {
-                Thread.sleep(1000);
             }
-
+            Thread.sleep(1000);
         }
     }
 

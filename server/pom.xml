@@ -76,11 +76,7 @@
         <dependency>
             <groupId>com.alipay.sofa</groupId>
             <artifactId>hessian</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>redis.clients</groupId>
-            <artifactId>jedis</artifactId>
+            <version>4.0.2</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.rocksdb/rocksdbjni

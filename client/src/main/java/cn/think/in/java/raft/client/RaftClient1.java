@@ -25,12 +25,12 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class RaftClient1 {
-
+    // 1s 插入一次，查询一次
     public static void main(String[] args) throws Throwable {
 
         RaftClientRPC rpc = new RaftClientRPC();
 
-        for (int i = 3; i > -1; i++) {
+        for (int i = 3; ; i++) {
             try {
                 String key = "hello:" + i;
                 String value = "world:" + i;
@@ -49,7 +49,6 @@ public class RaftClient1 {
                 i = i - 1;
             }
 
-            SleepHelper.sleep(5000);
         }
 
 

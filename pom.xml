@@ -22,11 +22,6 @@
             <version>4.13.2</version>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <version>1.18.26</version>
-        </dependency>
     </dependencies>
 
     <dependencyManagement>
@@ -106,7 +101,7 @@
             <dependency>
                 <groupId>com.alipay.sofa</groupId>
                 <artifactId>hessian</artifactId>
-                <version>3.3.6</version>
+                <version>4.0.2</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.rocksdb/rocksdbjni

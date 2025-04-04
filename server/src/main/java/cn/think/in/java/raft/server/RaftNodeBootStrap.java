@@ -61,6 +61,7 @@ public class RaftNodeBootStrap {
         config.setPeerAddrs(Arrays.asList(peerAddr));
         config.setStateMachineSaveType(StateMachineSaveType.ROCKS_DB.getTypeName());
 
+        // 线程安全的懒汉式单例
         Node node = DefaultNode.getInstance();
         node.setConfig(config);
 

@@ -32,6 +32,12 @@
 
         <dependency>
             <groupId>com.alipay.sofa</groupId>
+            <artifactId>hessian</artifactId>
+            <version>4.0.2</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.alipay.sofa</groupId>
             <artifactId>bolt</artifactId>
             <exclusions>
                 <exclusion>
